@@ -63,9 +63,42 @@ body {
 @keyframes spin { to{transform:rotate(360deg)} }
 .spinner { animation: spin .8s linear infinite; }
 
+/* ── Monaco error highlight ─────────────────────────────────────────────────── */
+.monaco-error-line { background: rgba(239, 68, 68, 0.20) !important; border-left: 2px solid #ef4444; }
+
 /* ── Drag handle ────────────────────────────────────────────────────────────── */
 .drag-handle { cursor: col-resize; }
 .drag-handle-v { cursor: row-resize; }
 .drag-handle:hover, .drag-handle-v:hover { background: #3b82f6 !important; }
 
 ::selection { background: #2563eb44; }
+
+/* ── Mobile ─────────────────────────────────────────────────────────────────── */
+/* Remove tap delay on interactive elements */
+button, a, [role="button"] {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Ensure 44px minimum tap targets on mobile */
+@media (max-width: 767px) {
+  button { min-height: 36px; }
+  nav button { min-height: 38px; }
+}
+
+/* Safe area padding for notched phones (iOS) */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  .mobile-safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* Prevent pull-to-refresh interferring with editor scroll */
+@media (max-width: 767px) {
+  body { overscroll-behavior: none; }
+}
+
+/* Hide scrollbar on mobile exercise list for cleaner look */
+@media (max-width: 767px) {
+  .overflow-y-auto::-webkit-scrollbar { width: 0; }
+}

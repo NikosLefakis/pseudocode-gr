@@ -99,6 +99,17 @@ function monacoThemeName(th: Theme) {
   return 'glossa-dark'
 }
 
+/* ─── useIsMobile ──────────────────────────────────────────────────────── */
+function useIsMobile(bp = 768) {
+  const [mobile, setMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < bp)
+  useEffect(() => {
+    const check = () => setMobile(window.innerWidth < bp)
+    window.addEventListener('resize', check)
+    return () => window.removeEventListener('resize', check)
+  }, [bp])
+  return mobile
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
    App
 ═══════════════════════════════════════════════════════════════════════ */
@@ -138,6 +149,11 @@ export default function App() {
   const [copied, setCopied]         = useState(false)
   const [footerModal, setFooterModal] = useState<'terms'|'privacy'|'cookies'|'credits'|'contact'|null>(null)
 
+  /* mobile */
+  const mobile = useIsMobile()
+  const [mobileTab, setMobileTab]       = useState<'code'|'terminal'>('code')
+  const [mobileExView, setMobileExView] = useState<'list'|'problem'|'editor'>('list')
+
   /* refs */
   const editorRef    = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
   const monacoRef    = useRef<typeof Monaco | null>(null)
@@ -145,8 +161,9 @@ export default function App() {
   const termEndRef   = useRef<HTMLDivElement | null>(null)
   const inputRef     = useRef<HTMLInputElement | null>(null)
   const decoRef      = useRef<string[]>([])
-  const containerRef = useRef<HTMLDivElement | null>(null)
-  const isDragging   = useRef(false)
+  const containerRef  = useRef<HTMLDivElement | null>(null)
+  const isDragging    = useRef(false)
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   /* ── CSS vars ─────────────────────────────────────────────────────── */
   const vars    = themeVars(theme)
@@ -228,6 +245,7 @@ export default function App() {
 
   /* ── stop ─────────────────────────────────────────────────────────── */
   const handleStop = useCallback(() => {
+    if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null }
     wsRef.current?.close(); wsRef.current = null
     setRunning(false); setAwaitInput(false)
     setTermLines(p => [...p, { kind: 'info', text: '⏹ Διακοπή από χρήστη.' }])
@@ -245,31 +263,62 @@ export default function App() {
       ? `${WS_URL.replace(/^http/, 'ws')}/ws/execute`
       : `${proto}://${host}/ws/execute`
 
-    const ws = new WebSocket(wsUrl); wsRef.current = ws
-    ws.onopen    = () => ws.send(JSON.stringify({ code }))
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data)
-      if (msg.type === 'output')        setTermLines(p => [...p, { kind: 'out',  text: msg.text }])
-      if (msg.type === 'input_request') setAwaitInput(true)
-      if (msg.type === 'done') {
-        setRunning(false); setAwaitInput(false)
-        ws.close(); wsRef.current = null
-        setDone({ success: msg.success, error: msg.error, line: msg.error_line })
-        if (!msg.success && msg.error_line && editorRef.current && monacoRef.current) {
-          const m = monacoRef.current
-          decoRef.current = editorRef.current.deltaDecorations([], [{
-            range: new m.Range(msg.error_line, 1, msg.error_line, 9999),
-            options: { isWholeLine: true, className: 'bg-red-900/30' }
-          }])
+    let retries = 0
+    const MAX_RETRIES = 12   // 12 × 5s = 60s max wait (Render cold start)
+    let stopped = false
+
+    const connect = () => {
+      if (stopped) return
+      const ws = new WebSocket(wsUrl)
+      wsRef.current = ws
+
+      ws.onopen = () => {
+        retries = 0
+        setTermLines([])          // clear any "waking up" messages
+        ws.send(JSON.stringify({ code }))
+      }
+
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data)
+        if (msg.type === 'output')        setTermLines(p => [...p, { kind: 'out',  text: msg.text }])
+        if (msg.type === 'input_request') setAwaitInput(true)
+        if (msg.type === 'done') {
+          setRunning(false); setAwaitInput(false)
+          stopped = true; ws.close(); wsRef.current = null
+          setDone({ success: msg.success, error: msg.error, line: msg.error_line })
+          if (!msg.success && msg.error_line && editorRef.current && monacoRef.current) {
+            const m = monacoRef.current
+            decoRef.current = editorRef.current.deltaDecorations([], [{
+              range: new m.Range(msg.error_line, 1, msg.error_line, 9999),
+              options: { isWholeLine: true, className: 'monaco-error-line' }
+            }])
+          }
         }
       }
+
+      ws.onerror = () => {
+        ws.close()
+        if (stopped) return
+        retries++
+        if (retries <= MAX_RETRIES) {
+          const elapsed = retries * 5
+          setTermLines([{ kind: 'info', text: `🕐 Ο διακομιστής ξυπνάει... (${elapsed}/${MAX_RETRIES * 5} δευτ.) — παρακαλώ περιμένετε` }])
+          retryTimerRef.current = setTimeout(connect, 5000)
+        } else {
+          stopped = true
+          setRunning(false); setAwaitInput(false)
+          setTermLines([{ kind: 'err', text: '❌ Αδυναμία σύνδεσης. Ο διακομιστής δεν ανταποκρίθηκε. Δοκίμασε ξανά σε λίγο.' }])
+          setDone({ success: false, error: 'Αδυναμία σύνδεσης με τον διακομιστή.' })
+        }
+      }
+
+      ws.onclose = () => {
+        if (stopped || retries > 0) return
+        setRunning(false); setAwaitInput(false)
+      }
     }
-    ws.onerror = () => {
-      setRunning(false); setAwaitInput(false)
-      setTermLines(p => [...p, { kind: 'err', text: 'Δεν ήταν δυνατή η σύνδεση με τον διακομιστή.' }])
-      setDone({ success: false, error: 'Αδυναμία σύνδεσης.' })
-    }
-    ws.onclose = () => { setRunning(false); setAwaitInput(false) }
+
+    connect()
   }, [code, running])
 
   /* ── submit input ─────────────────────────────────────────────────── */
@@ -312,7 +361,8 @@ export default function App() {
   const loadExercise = (ex: Exercise) => {
     setSelExercise(ex); setCode(ex.starter_code)
     setTermLines([]); setDone(null); setGradeResult(null); clearDecos()
-    setTimeout(() => editorRef.current?.focus(), 100)
+    if (mobile) { setMobileExView('problem'); setMobileTab('code') }
+    else setTimeout(() => editorRef.current?.focus(), 100)
   }
   const copyCode = () => {
     navigator.clipboard.writeText(code)
@@ -382,7 +432,7 @@ export default function App() {
             <div className="text-sm font-bold leading-none tracking-tight" style={{ color: text }}>
               pseudocode<span style={{ color: '#3b82f6' }}>.gr</span>
             </div>
-            <div className="text-xs mt-0.5" style={{ color: text3 }}>Ψευδοκώδικας ΑΕΠΠ · Πανελλήνιες</div>
+            <div className="hidden sm:block text-xs mt-0.5" style={{ color: text3 }}>Ψευδοκώδικας ΑΕΠΠ · Πανελλήνιες</div>
           </div>
         </div>
 
@@ -398,7 +448,7 @@ export default function App() {
             style={mode === 'editor'
               ? { background: '#3b82f6', color: 'white' }
               : { background: surface2, color: text2 }}>
-            {IC.pencil}<span>Επεξεργαστής</span>
+            {IC.pencil}<span className="hidden sm:inline">Επεξεργαστής</span>
           </button>
           <button
             onClick={() => setMode('exercises')}
@@ -408,13 +458,13 @@ export default function App() {
             style={mode === 'exercises'
               ? { background: '#3b82f6', color: 'white' }
               : { background: surface2, color: text2 }}>
-            {IC.grade}<span>Ασκήσεις</span>
+            {IC.grade}<span className="hidden sm:inline">Ασκήσεις</span>
           </button>
         </nav>
 
-        {/* Split direction (editor only) */}
-        {mode === 'editor' && (
-          <div className="flex items-center rounded-lg border overflow-hidden" style={{ borderColor: border }}>
+        {/* Split direction (editor only, desktop only) */}
+        {mode === 'editor' && !mobile && (
+          <div className="hidden sm:flex items-center rounded-lg border overflow-hidden" style={{ borderColor: border }}>
             <button onClick={() => setSplitDir('h')} title="Οριζόντια διαίρεση" aria-label="Οριζόντια διαίρεση" aria-pressed={splitDir === 'h'}
               className="flex items-center justify-center w-8 h-7 transition-all"
               style={{ background: splitDir === 'h' ? '#3b82f6' : surface2, color: splitDir === 'h' ? 'white' : text3 }}>
@@ -428,8 +478,8 @@ export default function App() {
           </div>
         )}
 
-        {/* Font size */}
-        <div className="flex items-center gap-1" role="group" aria-label="Μέγεθος γραμματοσειράς">
+        {/* Font size (desktop only) */}
+        <div className="hidden sm:flex items-center gap-1" role="group" aria-label="Μέγεθος γραμματοσειράς">
           <button onClick={() => setFontSize(s => Math.max(10, s - 2))} aria-label="Μικρότερη γραμματοσειρά"
             className="w-7 h-7 rounded border flex items-center justify-center text-xs font-bold transition-all"
             style={{ background: surface2, borderColor: border, color: text2 }}>A-</button>
@@ -442,9 +492,9 @@ export default function App() {
         {/* Examples (editor only) */}
         {mode === 'editor' && (
           <button onClick={() => setShowExamples(true)} aria-label="Παραδείγματα προγραμμάτων"
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-all"
+            className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 text-xs font-medium rounded-lg border transition-all"
             style={{ background: surface2, borderColor: border, color: text2 }}>
-            {IC.book}<span>Παραδείγματα</span>
+            {IC.book}<span className="hidden sm:inline">Παραδείγματα</span>
           </button>
         )}
 
@@ -460,163 +510,287 @@ export default function App() {
       {mode === 'exercises' && (
         <div className="flex flex-1 overflow-hidden" style={{ background: bg }}>
 
-          {/* ── LEFT: exercise list or problem statement ── */}
-          {!selExercise ? (
-            /* Exercise list */
-            <main className="flex flex-col w-full max-w-2xl mx-auto overflow-hidden p-6" aria-label="Λίστα ασκήσεων">
-              <h1 className="text-xl font-bold mb-1" style={{ color: text }}>Ασκήσεις ΓΛΩΣΣΑ</h1>
-              <p className="text-sm mb-4" style={{ color: text3 }}>Επίλεξε μια άσκηση, γράψε τον κώδικά σου και έλεγξε τη λύση σου αυτόματα.</p>
+          {mobile ? (
+            /* ── MOBILE EXERCISES: 3-view navigation ─────────────────── */
+            <div className="flex flex-col flex-1 overflow-hidden">
 
-              {/* Category filter */}
-              <div className="flex gap-2 flex-wrap mb-4" role="group" aria-label="Φίλτρο κατηγορίας">
-                {exCats.map(cat => (
-                  <button key={cat} onClick={() => setExCat(cat)} aria-pressed={exCat === cat}
-                    className="px-3 py-1 rounded-full text-xs font-medium transition-all"
-                    style={exCat === cat
-                      ? { background: '#3b82f6', color: 'white' }
-                      : { background: surface2, color: text2, border: `1px solid ${border}` }}>
-                    {cat}
-                  </button>
-                ))}
-              </div>
-
-              <div className="overflow-y-auto flex-1 space-y-2" role="list" aria-label="Ασκήσεις">
-                {filteredExercises.map(ex => (
-                  <button key={ex.id} onClick={() => loadExercise(ex)}
-                    role="listitem"
-                    aria-label={`Άσκηση: ${ex.title}, δυσκολία ${ex.difficulty}, ${ex.test_count} test cases`}
-                    className="w-full text-left p-4 rounded-xl border transition-all group"
-                    style={{ background: surface2, borderColor: border }}>
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-sm font-semibold group-hover:text-blue-500 transition-colors" style={{ color: text }}>
-                            {ex.title}
-                          </span>
-                          <span className="text-xs px-2 py-0.5 rounded-full font-medium"
-                            style={{ background: (diffColor[ex.difficulty] || '#64748b') + '22', color: diffColor[ex.difficulty] || '#64748b' }}>
-                            {ex.difficulty}
-                          </span>
-                        </div>
-                        <p className="text-xs leading-snug whitespace-pre-line" style={{ color: text3 }}>
-                          {ex.description.split('\n')[0]}
-                        </p>
-                      </div>
-                      <div className="flex flex-col items-end gap-1 shrink-0">
-                        <span className="text-xs px-2 py-0.5 rounded-full border" style={{ color: text3, borderColor: border, background: surface }}>
-                          {ex.category}
-                        </span>
-                        <span className="text-xs" style={{ color: text3 }}>{ex.test_count} tests</span>
-                      </div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </main>
-          ) : (
-            /* Exercise solving view: description left + editor right */
-            <div className="flex flex-1 overflow-hidden">
-
-              {/* Problem statement */}
-              <aside className="w-80 shrink-0 flex flex-col border-r overflow-hidden"
-                style={{ borderColor: border, background: surface }}
-                aria-label="Εκφώνηση άσκησης">
-                <div className="p-4 border-b flex items-center gap-2" style={{ borderColor: border }}>
-                  <button onClick={() => { setSelExercise(null); setGradeResult(null) }}
-                    aria-label="Επιστροφή στη λίστα ασκήσεων"
-                    className="p-1.5 rounded-lg transition-all" style={{ color: text3, background: surface2 }}>
-                    {IC.back}
-                  </button>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-bold truncate" style={{ color: text }}>{selExercise.title}</div>
-                    <div className="flex items-center gap-1.5 mt-0.5">
-                      <span className="text-xs" style={{ color: diffColor[selExercise.difficulty] || text3 }}>{selExercise.difficulty}</span>
-                      <span className="text-xs" style={{ color: text3 }}>· {selExercise.category}</span>
-                    </div>
+              {/* View 1: list */}
+              {(!selExercise || mobileExView === 'list') && (
+                <main className="flex flex-col flex-1 overflow-hidden p-4" aria-label="Λίστα ασκήσεων">
+                  <h1 className="text-lg font-bold mb-1" style={{ color: text }}>Ασκήσεις ΓΛΩΣΣΑ</h1>
+                  <p className="text-xs mb-3" style={{ color: text3 }}>Επίλεξε μια άσκηση και έλεγξε τη λύση σου αυτόματα.</p>
+                  <div className="flex gap-2 flex-wrap mb-3" role="group" aria-label="Φίλτρο κατηγορίας">
+                    {exCats.map(cat => (
+                      <button key={cat} onClick={() => setExCat(cat)} aria-pressed={exCat === cat}
+                        className="px-3 py-1 rounded-full text-xs font-medium transition-all"
+                        style={exCat === cat ? { background: '#3b82f6', color: 'white' } : { background: surface2, color: text2, border: `1px solid ${border}` }}>
+                        {cat}
+                      </button>
+                    ))}
                   </div>
-                </div>
-
-                <div className="flex-1 overflow-y-auto p-4">
-                  <h2 className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: text3 }}>Εκφώνηση</h2>
-                  <p className="text-sm leading-relaxed whitespace-pre-line" style={{ color: text2 }}>
-                    {selExercise.description}
-                  </p>
-
-                  <div className="mt-4 pt-4 border-t" style={{ borderColor: border }}>
-                    <p className="text-xs" style={{ color: text3 }}>
-                      {selExercise.test_count} κρυφά test cases θα ελέγξουν τη λύση σου.
-                    </p>
-                  </div>
-                </div>
-
-                {/* Grade button */}
-                <div className="p-4 border-t" style={{ borderColor: border }}>
-                  <button onClick={handleGrade} disabled={grading}
-                    aria-label="Έλεγχος λύσης"
-                    aria-busy={grading}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl font-semibold text-sm transition-all"
-                    style={{ background: grading ? '#1d4ed8' : '#2563eb', color: 'white', opacity: grading ? 0.7 : 1 }}>
-                    {grading
-                      ? <><svg className="spinner w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>Έλεγχος...</>
-                      : <>{IC.grade}Έλεγχος Λύσης</>}
-                  </button>
-
-                  {/* Grade results */}
-                  {gradeResult && (
-                    <div className="mt-3" role="region" aria-label="Αποτελέσματα βαθμολόγησης" aria-live="polite">
-                      <div className={`text-sm font-bold mb-2 ${gradeResult.passed === gradeResult.total ? 'text-green-500' : 'text-amber-500'}`}>
-                        {gradeResult.passed === gradeResult.total
-                          ? '🎉 Άριστα! Όλα σωστά!'
-                          : `${gradeResult.passed}/${gradeResult.total} test cases πέρασαν`}
-                      </div>
-                      <div className="space-y-1.5">
-                        {gradeResult.results.map((r, i) => (
-                          <div key={i} className="flex items-start gap-2 text-xs rounded-lg p-2"
-                            style={{ background: r.passed ? '#15803d22' : '#b91c1c22' }}
-                            role="listitem"
-                            aria-label={`Test ${i + 1}: ${r.passed ? 'Πέρασε' : 'Απέτυχε'}`}>
-                            <span aria-hidden="true">{r.passed ? '✓' : '✗'}</span>
-                            <div className="flex-1 min-w-0">
-                              <span style={{ color: r.passed ? '#4ade80' : '#f87171' }}>Test {i + 1}</span>
-                              {!r.passed && (
-                                <div className="mt-1 space-y-0.5 font-mono text-xs" style={{ color: text3 }}>
-                                  <div>Έξοδος: <span style={{ color: '#f87171' }}>{r.output || '(κενό)'}</span></div>
-                                  <div>Αναμ.: <span style={{ color: '#4ade80' }}>{r.expected}</span></div>
-                                </div>
-                              )}
+                  <div className="overflow-y-auto flex-1 space-y-2" role="list">
+                    {filteredExercises.map(ex => (
+                      <button key={ex.id} onClick={() => loadExercise(ex)} role="listitem"
+                        aria-label={`Άσκηση: ${ex.title}`}
+                        className="w-full text-left p-4 rounded-xl border transition-all active:scale-[0.99]"
+                        style={{ background: surface2, borderColor: border }}>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1 flex-wrap">
+                              <span className="text-sm font-semibold" style={{ color: text }}>{ex.title}</span>
+                              <span className="text-xs px-2 py-0.5 rounded-full font-medium"
+                                style={{ background: (diffColor[ex.difficulty] || '#64748b') + '22', color: diffColor[ex.difficulty] || '#64748b' }}>
+                                {ex.difficulty}
+                              </span>
                             </div>
+                            <p className="text-xs leading-snug" style={{ color: text3 }}>{ex.description.split('\n')[0]}</p>
                           </div>
-                        ))}
+                          <span className="text-xs px-2 py-0.5 rounded-full border shrink-0 mt-0.5"
+                            style={{ color: text3, borderColor: border, background: surface }}>{ex.category}</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </main>
+              )}
+
+              {/* View 2: problem statement */}
+              {selExercise && mobileExView === 'problem' && (
+                <>
+                  <div className="flex items-center gap-2 px-4 py-3 border-b shrink-0"
+                    style={{ borderColor: border, background: 'var(--header)' }}>
+                    <button onClick={() => { setSelExercise(null); setMobileExView('list'); setGradeResult(null) }}
+                      aria-label="Επιστροφή στη λίστα"
+                      className="p-2 rounded-lg shrink-0" style={{ color: text3, background: surface2 }}>
+                      {IC.back}
+                    </button>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-bold truncate" style={{ color: text }}>{selExercise.title}</div>
+                      <div className="text-xs mt-0.5">
+                        <span style={{ color: diffColor[selExercise.difficulty] || text3 }}>{selExercise.difficulty}</span>
+                        <span style={{ color: text3 }}> · {selExercise.category}</span>
                       </div>
                     </div>
-                  )}
-                </div>
-              </aside>
+                  </div>
 
-              {/* Editor + Terminal for exercise */}
-              <div className="flex flex-1 overflow-hidden flex-col">
-                <EditorTerminalPanel
-                  code={code} setCode={setCode}
-                  running={running} done={done}
-                  termLines={termLines} awaitInput={awaitInput}
-                  inputVal={inputVal} setInputVal={setInputVal}
-                  handleRun={handleRun} handleStop={handleStop}
-                  submitInput={submitInput} copyCode={copyCode}
-                  copied={copied} clearDecos={clearDecos}
-                  editorRef={editorRef} monacoRef={monacoRef}
-                  termEndRef={termEndRef} inputRef={inputRef}
-                  decoRef={decoRef} handleEditorMount={handleEditorMount}
-                  cursorPos={cursorPos}
-                  editorFull={editorFull} setEditorFull={setEditorFull}
-                  termFull={termFull} setTermFull={setTermFull}
-                  splitDir={splitDir} splitRatio={splitRatio}
-                  startDrag={startDrag} containerRef={containerRef}
-                  dark={dark} hc={hc} bg={bg} surface={surface} surface2={surface2}
-                  border={border} text={text} text2={text2} text3={text3}
-                  fontSize={fontSize} setDone={setDone} setTermLines={setTermLines}
-                />
-              </div>
+                  <div className="flex-1 overflow-y-auto p-4">
+                    <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: text3 }}>Εκφώνηση</p>
+                    <p className="text-sm leading-relaxed whitespace-pre-line" style={{ color: text2 }}>{selExercise.description}</p>
+                    <div className="mt-4 pt-4 border-t" style={{ borderColor: border }}>
+                      <p className="text-xs" style={{ color: text3 }}>{selExercise.test_count} κρυφά test cases θα ελέγξουν τη λύση σου.</p>
+                    </div>
+                    {gradeResult && (
+                      <div className="mt-4" role="region" aria-live="polite">
+                        <div className={`text-sm font-bold mb-2 ${gradeResult.passed === gradeResult.total ? 'text-green-500' : 'text-amber-500'}`}>
+                          {gradeResult.passed === gradeResult.total ? '🎉 Άριστα! Όλα σωστά!' : `${gradeResult.passed}/${gradeResult.total} tests πέρασαν`}
+                        </div>
+                        <div className="space-y-1">
+                          {gradeResult.results.map((r, i) => (
+                            <div key={i} className="flex items-start gap-2 text-xs rounded-lg p-2"
+                              style={{ background: r.passed ? '#15803d22' : '#b91c1c22' }}>
+                              <span>{r.passed ? '✓' : '✗'}</span>
+                              <div className="flex-1 min-w-0">
+                                <span style={{ color: r.passed ? '#4ade80' : '#f87171' }}>Test {i + 1}</span>
+                                {!r.passed && (
+                                  <div className="mt-0.5 font-mono text-xs" style={{ color: text3 }}>
+                                    <div>Έξοδος: <span style={{ color: '#f87171' }}>{r.output || '(κενό)'}</span></div>
+                                    <div>Αναμ.: <span style={{ color: '#4ade80' }}>{r.expected}</span></div>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="p-4 border-t shrink-0 flex flex-col gap-2" style={{ borderColor: border }}>
+                    <button onClick={() => { setMobileExView('editor'); setTimeout(() => editorRef.current?.focus(), 100) }}
+                      className="w-full py-3 rounded-xl font-bold text-sm transition-all active:scale-[0.99]"
+                      style={{ background: '#2563eb', color: 'white' }}>
+                      Κωδικοποίηση →
+                    </button>
+                    <button onClick={handleGrade} disabled={grading} aria-busy={grading}
+                      className="w-full py-2.5 rounded-xl text-sm font-semibold border transition-all"
+                      style={{ borderColor: '#3b82f640', background: '#3b82f610', color: '#60a5fa', opacity: grading ? 0.7 : 1 }}>
+                      {grading ? '⏳ Έλεγχος...' : '🧪 Έλεγχος Λύσης'}
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {/* View 3: editor */}
+              {selExercise && mobileExView === 'editor' && (
+                <>
+                  <div className="flex items-center gap-2 px-3 py-2 border-b shrink-0"
+                    style={{ borderColor: border, background: 'var(--header)' }}>
+                    <button onClick={() => setMobileExView('problem')}
+                      aria-label="Επιστροφή στην εκφώνηση"
+                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium shrink-0"
+                      style={{ color: text2, background: surface2 }}>
+                      {IC.back}<span>Εκφώνηση</span>
+                    </button>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-semibold truncate" style={{ color: text3 }}>{selExercise.title}</div>
+                    </div>
+                  </div>
+                  <EditorTerminalPanel
+                    code={code} setCode={setCode}
+                    running={running} done={done}
+                    termLines={termLines} awaitInput={awaitInput}
+                    inputVal={inputVal} setInputVal={setInputVal}
+                    handleRun={handleRun} handleStop={handleStop}
+                    submitInput={submitInput} copyCode={copyCode}
+                    copied={copied} clearDecos={clearDecos}
+                    editorRef={editorRef} monacoRef={monacoRef}
+                    termEndRef={termEndRef} inputRef={inputRef}
+                    decoRef={decoRef} handleEditorMount={handleEditorMount}
+                    cursorPos={cursorPos}
+                    editorFull={editorFull} setEditorFull={setEditorFull}
+                    termFull={termFull} setTermFull={setTermFull}
+                    splitDir={splitDir} splitRatio={splitRatio}
+                    startDrag={startDrag} containerRef={containerRef}
+                    dark={dark} hc={hc} bg={bg} surface={surface} surface2={surface2}
+                    border={border} text={text} text2={text2} text3={text3}
+                    fontSize={fontSize} setDone={setDone} setTermLines={setTermLines}
+                    mobile={true} mobileTab={mobileTab} onMobileTabChange={setMobileTab}
+                  />
+                </>
+              )}
             </div>
+
+          ) : (
+            /* ── DESKTOP EXERCISES ─────────────────────────────────────── */
+            <>
+              {!selExercise ? (
+                /* Exercise list */
+                <main className="flex flex-col w-full max-w-2xl mx-auto overflow-hidden p-6" aria-label="Λίστα ασκήσεων">
+                  <h1 className="text-xl font-bold mb-1" style={{ color: text }}>Ασκήσεις ΓΛΩΣΣΑ</h1>
+                  <p className="text-sm mb-4" style={{ color: text3 }}>Επίλεξε μια άσκηση, γράψε τον κώδικά σου και έλεγξε τη λύση σου αυτόματα.</p>
+                  <div className="flex gap-2 flex-wrap mb-4" role="group" aria-label="Φίλτρο κατηγορίας">
+                    {exCats.map(cat => (
+                      <button key={cat} onClick={() => setExCat(cat)} aria-pressed={exCat === cat}
+                        className="px-3 py-1 rounded-full text-xs font-medium transition-all"
+                        style={exCat === cat ? { background: '#3b82f6', color: 'white' } : { background: surface2, color: text2, border: `1px solid ${border}` }}>
+                        {cat}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="overflow-y-auto flex-1 space-y-2" role="list" aria-label="Ασκήσεις">
+                    {filteredExercises.map(ex => (
+                      <button key={ex.id} onClick={() => loadExercise(ex)} role="listitem"
+                        aria-label={`Άσκηση: ${ex.title}, δυσκολία ${ex.difficulty}, ${ex.test_count} test cases`}
+                        className="w-full text-left p-4 rounded-xl border transition-all group"
+                        style={{ background: surface2, borderColor: border }}>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-sm font-semibold group-hover:text-blue-500 transition-colors" style={{ color: text }}>{ex.title}</span>
+                              <span className="text-xs px-2 py-0.5 rounded-full font-medium"
+                                style={{ background: (diffColor[ex.difficulty] || '#64748b') + '22', color: diffColor[ex.difficulty] || '#64748b' }}>
+                                {ex.difficulty}
+                              </span>
+                            </div>
+                            <p className="text-xs leading-snug whitespace-pre-line" style={{ color: text3 }}>{ex.description.split('\n')[0]}</p>
+                          </div>
+                          <div className="flex flex-col items-end gap-1 shrink-0">
+                            <span className="text-xs px-2 py-0.5 rounded-full border" style={{ color: text3, borderColor: border, background: surface }}>{ex.category}</span>
+                            <span className="text-xs" style={{ color: text3 }}>{ex.test_count} tests</span>
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </main>
+              ) : (
+                /* Exercise solving view: description left + editor right */
+                <div className="flex flex-1 overflow-hidden">
+                  <aside className="w-80 shrink-0 flex flex-col border-r overflow-hidden"
+                    style={{ borderColor: border, background: surface }} aria-label="Εκφώνηση άσκησης">
+                    <div className="p-4 border-b flex items-center gap-2" style={{ borderColor: border }}>
+                      <button onClick={() => { setSelExercise(null); setGradeResult(null) }}
+                        aria-label="Επιστροφή στη λίστα ασκήσεων"
+                        className="p-1.5 rounded-lg transition-all" style={{ color: text3, background: surface2 }}>
+                        {IC.back}
+                      </button>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-bold truncate" style={{ color: text }}>{selExercise.title}</div>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <span className="text-xs" style={{ color: diffColor[selExercise.difficulty] || text3 }}>{selExercise.difficulty}</span>
+                          <span className="text-xs" style={{ color: text3 }}>· {selExercise.category}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4">
+                      <h2 className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: text3 }}>Εκφώνηση</h2>
+                      <p className="text-sm leading-relaxed whitespace-pre-line" style={{ color: text2 }}>{selExercise.description}</p>
+                      <div className="mt-4 pt-4 border-t" style={{ borderColor: border }}>
+                        <p className="text-xs" style={{ color: text3 }}>{selExercise.test_count} κρυφά test cases θα ελέγξουν τη λύση σου.</p>
+                      </div>
+                    </div>
+                    <div className="p-4 border-t" style={{ borderColor: border }}>
+                      <button onClick={handleGrade} disabled={grading}
+                        aria-label="Έλεγχος λύσης" aria-busy={grading}
+                        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl font-semibold text-sm transition-all"
+                        style={{ background: grading ? '#1d4ed8' : '#2563eb', color: 'white', opacity: grading ? 0.7 : 1 }}>
+                        {grading
+                          ? <><svg className="spinner w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>Έλεγχος...</>
+                          : <>{IC.grade}Έλεγχος Λύσης</>}
+                      </button>
+                      {gradeResult && (
+                        <div className="mt-3" role="region" aria-label="Αποτελέσματα βαθμολόγησης" aria-live="polite">
+                          <div className={`text-sm font-bold mb-2 ${gradeResult.passed === gradeResult.total ? 'text-green-500' : 'text-amber-500'}`}>
+                            {gradeResult.passed === gradeResult.total ? '🎉 Άριστα! Όλα σωστά!' : `${gradeResult.passed}/${gradeResult.total} test cases πέρασαν`}
+                          </div>
+                          <div className="space-y-1.5">
+                            {gradeResult.results.map((r, i) => (
+                              <div key={i} className="flex items-start gap-2 text-xs rounded-lg p-2"
+                                style={{ background: r.passed ? '#15803d22' : '#b91c1c22' }} role="listitem"
+                                aria-label={`Test ${i + 1}: ${r.passed ? 'Πέρασε' : 'Απέτυχε'}`}>
+                                <span aria-hidden="true">{r.passed ? '✓' : '✗'}</span>
+                                <div className="flex-1 min-w-0">
+                                  <span style={{ color: r.passed ? '#4ade80' : '#f87171' }}>Test {i + 1}</span>
+                                  {!r.passed && (
+                                    <div className="mt-1 space-y-0.5 font-mono text-xs" style={{ color: text3 }}>
+                                      <div>Έξοδος: <span style={{ color: '#f87171' }}>{r.output || '(κενό)'}</span></div>
+                                      <div>Αναμ.: <span style={{ color: '#4ade80' }}>{r.expected}</span></div>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </aside>
+                  <div className="flex flex-1 overflow-hidden flex-col">
+                    <EditorTerminalPanel
+                      code={code} setCode={setCode}
+                      running={running} done={done}
+                      termLines={termLines} awaitInput={awaitInput}
+                      inputVal={inputVal} setInputVal={setInputVal}
+                      handleRun={handleRun} handleStop={handleStop}
+                      submitInput={submitInput} copyCode={copyCode}
+                      copied={copied} clearDecos={clearDecos}
+                      editorRef={editorRef} monacoRef={monacoRef}
+                      termEndRef={termEndRef} inputRef={inputRef}
+                      decoRef={decoRef} handleEditorMount={handleEditorMount}
+                      cursorPos={cursorPos}
+                      editorFull={editorFull} setEditorFull={setEditorFull}
+                      termFull={termFull} setTermFull={setTermFull}
+                      splitDir={splitDir} splitRatio={splitRatio}
+                      startDrag={startDrag} containerRef={containerRef}
+                      dark={dark} hc={hc} bg={bg} surface={surface} surface2={surface2}
+                      border={border} text={text} text2={text2} text3={text3}
+                      fontSize={fontSize} setDone={setDone} setTermLines={setTermLines}
+                      mobile={false}
+                    />
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -642,6 +816,7 @@ export default function App() {
           dark={dark} hc={hc} bg={bg} surface={surface} surface2={surface2}
           border={border} text={text} text2={text2} text3={text3}
           fontSize={fontSize} setDone={setDone} setTermLines={setTermLines}
+          mobile={mobile} mobileTab={mobileTab} onMobileTabChange={setMobileTab}
         />
       )}
 
@@ -651,9 +826,9 @@ export default function App() {
           Γρ. {cursorPos.line} · Στ. {cursorPos.col}
         </span>
         <div className="flex-1" />
-        <span className="opacity-60">ΓΛΩΣΣΑ · ΑΕΠΠ Ψευδοκώδικας</span>
-        <div className="flex-1" />
-        <div className="flex items-center gap-1 opacity-80">
+        <span className="hidden sm:inline opacity-60">ΓΛΩΣΣΑ · ΑΕΠΠ Ψευδοκώδικας</span>
+        <div className="hidden sm:block flex-1" />
+        <div className="hidden sm:flex items-center gap-1 opacity-80">
           <kbd className="px-1.5 py-0.5 bg-blue-500/50 rounded font-mono" aria-label="πλήκτρο εκτέλεσης">Ctrl+Enter</kbd>
           <span>Εκτέλεση</span>
         </div>
@@ -778,6 +953,9 @@ interface PanelProps {
   border: string; text: string; text2: string; text3: string
   fontSize: number
   setDone: (v: any) => void; setTermLines: (fn: any) => void
+  mobile?: boolean
+  mobileTab?: 'code' | 'terminal'
+  onMobileTabChange?: (t: 'code' | 'terminal') => void
 }
 
 const IC2 = {
@@ -805,12 +983,25 @@ function EditorTerminalPanel(p: PanelProps) {
       ? { flex: '0 0 0', overflow: 'hidden' }
       : { flex: '1 1 0' }
 
+  // Auto-switch to terminal on mobile when running or awaiting input
+  useEffect(() => {
+    if (p.mobile && p.running) p.onMobileTabChange?.('terminal')
+  }, [p.running, p.mobile])
+  useEffect(() => {
+    if (p.mobile && p.awaitInput) p.onMobileTabChange?.('terminal')
+  }, [p.awaitInput, p.mobile])
+
+  // Mobile: section visibility
+  const showEditor   = !p.mobile || p.mobileTab === 'code'
+  const showTerminal = !p.mobile || p.mobileTab === 'terminal'
+
   return (
     <div ref={p.containerRef}
-      className={`flex flex-1 overflow-hidden ${p.splitDir === 'v' ? 'flex-col' : 'flex-row'}`}>
+      className={`flex flex-1 overflow-hidden ${p.mobile ? 'flex-col' : p.splitDir === 'v' ? 'flex-col' : 'flex-row'}`}>
 
       {/* ── EDITOR PANEL ─────────────────────────────────────────── */}
-      <section className="flex flex-col overflow-hidden border-r" style={{ ...editorStyle, borderColor: p.border }}
+      <section className="flex flex-col overflow-hidden border-r"
+        style={{ ...(p.mobile ? (showEditor ? { flex: '1 1 100%' } : { display: 'none' }) : editorStyle), borderColor: p.border }}
         aria-label="Επεξεργαστής κώδικα">
 
         {/* Editor toolbar */}
@@ -908,7 +1099,7 @@ function EditorTerminalPanel(p: PanelProps) {
       </section>
 
       {/* ── DRAG HANDLE ──────────────────────────────────────────── */}
-      {!p.editorFull && !p.termFull && (
+      {!p.mobile && !p.editorFull && !p.termFull && (
         <div onMouseDown={p.startDrag}
           className={p.splitDir === 'h' ? 'drag-handle' : 'drag-handle-v'}
           role="separator" aria-orientation={p.splitDir === 'h' ? 'vertical' : 'horizontal'}
@@ -924,7 +1115,8 @@ function EditorTerminalPanel(p: PanelProps) {
       )}
 
       {/* ── TERMINAL PANEL ────────────────────────────────────────── */}
-      <section className="flex flex-col overflow-hidden" style={{ ...termStyle, background: 'var(--terminal)', borderColor: p.border }}
+      <section className="flex flex-col overflow-hidden"
+        style={{ ...(p.mobile ? (showTerminal ? { flex: '1 1 100%' } : { display: 'none' }) : termStyle), background: 'var(--terminal)', borderColor: p.border }}
         aria-label="Τερματικό εξόδου">
 
         {/* Terminal header */}
@@ -1055,8 +1247,20 @@ function EditorTerminalPanel(p: PanelProps) {
               </div>
               <p className="text-sm leading-snug" style={{ color: p.dark ? '#fca5a5' : '#b91c1c' }}>{p.done.error}</p>
               {p.done.line && (
-                <button onClick={() => p.editorRef.current?.revealLineInCenter(p.done!.line!)}
-                  className="mt-2 text-xs underline underline-offset-2 transition-colors"
+                <button
+                  onClick={() => {
+                    const line = p.done!.line!
+                    // On mobile, switch to code tab first
+                    p.onMobileTabChange?.('code')
+                    setTimeout(() => {
+                      const ed = p.editorRef.current
+                      if (!ed) return
+                      ed.revealLineInCenter(line)
+                      ed.setPosition({ lineNumber: line, column: 1 })
+                      ed.focus()
+                    }, p.mobile ? 80 : 0)
+                  }}
+                  className="mt-2 flex items-center gap-1 text-xs underline underline-offset-2 transition-colors"
                   style={{ color: '#f87171' }}
                   aria-label={`Μετάβαση στη γραμμή ${p.done.line}`}>
                   Μετάβαση στη γραμμή {p.done.line} →
@@ -1074,10 +1278,68 @@ function EditorTerminalPanel(p: PanelProps) {
           <div ref={p.termEndRef} />
         </div>
 
-        {/* Quick reference */}
-        <QuickRef dark={p.dark} border={p.border} surface={p.surface} surface2={p.surface2}
-          text={p.text} text2={p.text2} text3={p.text3} />
+        {/* Quick reference (desktop only) */}
+        {!p.mobile && (
+          <QuickRef dark={p.dark} border={p.border} surface={p.surface} surface2={p.surface2}
+            text={p.text} text2={p.text2} text3={p.text3} />
+        )}
       </section>
+
+      {/* ── MOBILE BOTTOM TAB BAR ────────────────────────────────── */}
+      {p.mobile && (
+        <div className="flex items-center shrink-0 border-t"
+          style={{ background: 'var(--header)', borderColor: p.border }}>
+          {/* Code tab */}
+          <button
+            onClick={() => p.onMobileTabChange?.('code')}
+            aria-pressed={p.mobileTab === 'code'}
+            className="flex flex-1 flex-col items-center justify-center gap-0.5 py-2.5 transition-all"
+            style={{ color: p.mobileTab === 'code' ? '#3b82f6' : p.text3 }}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5" aria-hidden="true">
+              <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
+              <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+            </svg>
+            <span className="text-xs font-medium">Κώδικας</span>
+          </button>
+
+          {/* Run / Stop button in center */}
+          {p.running ? (
+            <button onClick={p.handleStop}
+              className="flex flex-col items-center justify-center gap-0.5 py-2.5 px-5 transition-all"
+              style={{ color: '#f87171' }} aria-label="Διακοπή εκτέλεσης">
+              <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+              <span className="text-xs font-medium">Διακοπή</span>
+            </button>
+          ) : (
+            <button onClick={p.handleRun}
+              className="flex flex-col items-center justify-center gap-0.5 py-2.5 px-5 transition-all"
+              style={{ color: '#3b82f6' }} aria-label="Εκτέλεση κώδικα">
+              <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+              <span className="text-xs font-medium">Εκτέλεση</span>
+            </button>
+          )}
+
+          {/* Terminal tab */}
+          <button
+            onClick={() => p.onMobileTabChange?.('terminal')}
+            aria-pressed={p.mobileTab === 'terminal'}
+            className="flex flex-1 flex-col items-center justify-center gap-0.5 py-2.5 transition-all relative"
+            style={{ color: p.mobileTab === 'terminal' ? '#3b82f6' : p.text3 }}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="w-5 h-5" aria-hidden="true">
+              <rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 9l3 3-3 3M13 15h4"/>
+            </svg>
+            <span className="text-xs font-medium">Τερματικό</span>
+            {/* Running indicator dot */}
+            {p.running && (
+              <span className="absolute top-2 right-5 w-2 h-2 rounded-full bg-yellow-400" aria-hidden="true" />
+            )}
+            {/* Await input indicator */}
+            {p.awaitInput && (
+              <span className="absolute top-2 right-5 w-2 h-2 rounded-full bg-blue-400 animate-pulse" aria-hidden="true" />
+            )}
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -1387,7 +1649,7 @@ function QuickRef({ dark, border, surface, surface2, text, text2, text3 }: {
 
       {open && (
         <div id="quickref-body" className="px-4 pb-4 space-y-3 text-xs fade-in border-t" style={{ borderColor: border }}>
-          <div className="pt-3 grid grid-cols-2 gap-3">
+          <div className="pt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
             {sections.map(sec => (
               <div key={sec.title}>
                 <div className="font-semibold uppercase tracking-wider text-xs mb-1.5" style={{ color: text3 }}>
