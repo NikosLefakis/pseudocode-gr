@@ -36,7 +36,13 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Restrict in production to your domain
+    allow_origins=[
+        "https://pseudocode.gr",
+        "https://www.pseudocode.gr",
+        # local dev
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

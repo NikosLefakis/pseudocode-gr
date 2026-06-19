@@ -1066,44 +1066,68 @@ function EditorTerminalPanel(p: PanelProps) {
           )}
         </div>
 
-        {/* Monaco editor */}
-        <div className="flex-1 overflow-hidden select-text" role="region" aria-label="Κώδικας ΓΛΩΣΣΑ">
-          <Editor
-            height="100%"
-            defaultLanguage={LANGUAGE_ID}
-            value={p.code}
-            onChange={v => p.setCode(v || '')}
-            onMount={p.handleEditorMount}
-            options={{
-              fontSize: p.fontSize,
-              fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',monospace",
-              fontLigatures: true,
-              lineNumbers: 'on',
-              minimap: { enabled: false },
-              scrollBeyondLastLine: false,
-              wordWrap: 'on',
-              padding: { top: 14, bottom: 14 },
-              suggest: { showSnippets: true },
-              quickSuggestions: { other: true, comments: false, strings: false },
-              bracketPairColorization: { enabled: true },
-              renderLineHighlight: 'line',
-              smoothScrolling: true,
-              cursorBlinking: 'smooth',
-              cursorSmoothCaretAnimation: 'on',
-              tabSize: 2,
-              glyphMargin: false,
-              lineNumbersMinChars: 3,
-              occurrencesHighlight: 'off',
-              selectionHighlight: false,
-              unicodeHighlight: {
-                ambiguousCharacters: false,
-                invisibleCharacters: false,
-                nonBasicASCII: false,
-              },
-              accessibilitySupport: 'on',
-              ariaLabel: 'Επεξεργαστής κώδικα ΓΛΩΣΣΑ',
-            }}
-          />
+        {/* Monaco editor (desktop) / Native textarea (mobile) */}
+        <div className="flex-1 overflow-hidden select-text flex flex-col" role="region" aria-label="Κώδικας ΓΛΩΣΣΑ">
+          {p.mobile ? (
+            <textarea
+              value={p.code}
+              onChange={e => p.setCode(e.target.value)}
+              spellCheck={false}
+              autoCapitalize="none"
+              autoCorrect="off"
+              autoComplete="off"
+              className="flex-1 w-full resize-none outline-none"
+              style={{
+                background: 'transparent',
+                color: p.text,
+                fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+                fontSize: `${p.fontSize}px`,
+                lineHeight: '1.7',
+                border: 'none',
+                padding: '14px 16px',
+                caretColor: '#3b82f6',
+              }}
+              placeholder={'ΠΡΟΓΡΑΜΜΑ Ονομα\nΜΕΤΑΒΛΗΤΕΣ\n  ΑΚΕΡΑΙΕΣ: x\nΑΡΧΗ\n  ΔΙΑΒΑΣΕ x\n  ΓΡΑΨΕ x\nΤΕΛΟΣ_ΠΡΟΓΡΑΜΜΑΤΟΣ'}
+              aria-label="Επεξεργαστής κώδικα ΓΛΩΣΣΑ"
+            />
+          ) : (
+            <Editor
+              height="100%"
+              defaultLanguage={LANGUAGE_ID}
+              value={p.code}
+              onChange={v => p.setCode(v || '')}
+              onMount={p.handleEditorMount}
+              options={{
+                fontSize: p.fontSize,
+                fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',monospace",
+                fontLigatures: true,
+                lineNumbers: 'on',
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                wordWrap: 'on',
+                padding: { top: 14, bottom: 14 },
+                suggest: { showSnippets: true },
+                quickSuggestions: { other: true, comments: false, strings: false },
+                bracketPairColorization: { enabled: true },
+                renderLineHighlight: 'line',
+                smoothScrolling: true,
+                cursorBlinking: 'smooth',
+                cursorSmoothCaretAnimation: 'on',
+                tabSize: 2,
+                glyphMargin: false,
+                lineNumbersMinChars: 3,
+                occurrencesHighlight: 'off',
+                selectionHighlight: false,
+                unicodeHighlight: {
+                  ambiguousCharacters: false,
+                  invisibleCharacters: false,
+                  nonBasicASCII: false,
+                },
+                accessibilitySupport: 'on',
+                ariaLabel: 'Επεξεργαστής κώδικα ΓΛΩΣΣΑ',
+              }}
+            />
+          )}
         </div>
       </section>
 
