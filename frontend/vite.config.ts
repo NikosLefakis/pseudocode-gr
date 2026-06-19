@@ -9,7 +9,4 @@ export default defineConfig({
     }
   },
   build: { outDir: 'dist' },
-  optimizeDeps: {
-    exclude: ['monaco-editor']
-  }
 })

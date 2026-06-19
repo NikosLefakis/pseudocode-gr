@@ -1,7 +1,12 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import Editor, { OnMount } from '@monaco-editor/react'
+import Editor, { OnMount, loader } from '@monaco-editor/react'
 import { registerGlossa, LANGUAGE_ID } from './glossaLanguage'
 import type * as Monaco from 'monaco-editor'
+
+// Load Monaco from CDN — keeps monaco-editor out of the Vite production bundle
+loader.config({
+  paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.50.0/min/vs' }
+})
 
 /* ─── config ─────────────────────────────────────────────────────────── */
 const API    = import.meta.env.VITE_API_URL || ''
