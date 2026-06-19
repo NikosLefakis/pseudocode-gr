@@ -254,6 +254,10 @@ export default function App() {
   /* ── run ──────────────────────────────────────────────────────────── */
   const handleRun = useCallback(() => {
     if (running) return
+    if (!code.trim()) {
+      editorRef.current?.focus()
+      return
+    }
     setTermLines([]); setDone(null); setAwaitInput(false); setInputVal('')
     setGradeResult(null); setRunning(true); clearDecos()
 
