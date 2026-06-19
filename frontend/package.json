@@ -11,7 +11,9 @@
     "node": "22.x"
   },
   "overrides": {
-    "tinyglobby>fdir": "6.4.4"
+    "tinyglobby": {
+      "fdir": "6.4.4"
+    }
   },
   "dependencies": {
     "react": "^18.3.1",
